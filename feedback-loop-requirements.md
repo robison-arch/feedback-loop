@@ -2,6 +2,9 @@
 ### Game Design & Technical Requirements
 *Hackathon Build Document — Single-Session Claude Code Brief*
 
+**Live:** https://robison-arch.github.io/feedback-loop/
+**Repo:** https://github.com/robison-arch/feedback-loop
+
 ---
 
 ## HOW TO USE THIS DOCUMENT
@@ -86,7 +89,8 @@ Sound is a primary navigation mechanic. Players learn to listen for tab-specific
 - Silence is meaningful — Tab 1 begins silent in darkness; lofi starts on flashlight pickup
 - All audio generated via Web Audio API — no external assets required
 - Tab frequencies: Tab 1 = 220Hz, Tab 2 = 277Hz, Tab 3 = 330Hz, Tab 4 = 440Hz
-- **Sustained conclusion tone**: `playSustainedTone(volume, fadeInSec)` creates a 440Hz sine wave connected directly to `ctx.destination` (bypasses music bus). Fades in over 4 seconds. Used during the final game conclusion across all tabs. `stopSustainedTone()` fades out over 2 seconds.
+- **Concluding swell**: `playConcludingSwell()` plays a one-shot reprise of the title screen "machine awakening" drone. Four layers: low drone (35→65Hz), tritone drone (49.5→92Hz), detuned shimmer (2400/2403Hz triangles), sub-bass C1 with 0.5Hz LFO. 3s swell, 2s hold, 5s fade = 10s total. Bypasses `_musicBus` (connects to `ctx.destination`). Only called by Tab 4's `triggerConclusion()`.
+- **Silence all**: `silenceAll()` permanently stops all music and ambient on a tab. Sets a `_silenced` flag that prevents `_musicStarter` from re-firing on visibility restore or `initAudio()`. Called by the game shell on all tabs when `GAME_COMPLETE_FINAL` is received, so only Tab 4 (which plays its own swell) produces sound during the conclusion.
 
 ### 3.4 Tab Identity System
 
@@ -107,7 +111,7 @@ Each tab has three persistent identity signals that double as puzzle navigation 
 | Tab 3 | ■ Square | The Loop | The Loop | N/A (destination tab) |
 | Tab 4 | ● Circle | Emergence | — | N/A (conclusion tab) |
 
-**Conclusion state:** All tabs set title to `"I AM — FEEDBACK LOOP"` and favicon to ● Circle on `GAME_COMPLETE_FINAL`.
+**Conclusion state:** On `GAME_COMPLETE_FINAL`, tab titles are distributed: Tab 1 → "I", Tab 2 → "AM", Tab 3 → "FEEDBACK", Tab 4 → "LOOP". All favicons set to ● Circle. Non-Tab-4 tabs go silent (`silenceAll()`); only Tab 4 plays the concluding swell.
 
 ---
 
@@ -135,13 +139,13 @@ Each tab has three persistent identity signals that double as puzzle navigation 
 │   ├── renderer.js         # Canvas loop, player movement, collision, directional flashlight cone, darkness mask
 │   ├── state.js            # localStorage schema, read/write/broadcast helpers
 │   ├── channel.js          # BroadcastChannel wrapper with localStorage fallback
-│   ├── audio.js            # Music bus, lofi generator, chimes, sustained tone, Page Visibility fade, duck
+│   ├── audio.js            # Music bus, lofi generator, chimes, concluding swell, silenceAll, Page Visibility fade, duck
 │   ├── favicon.js          # Shape renderer (circle/triangle/square), favicon updater, pulse animation
 │   └── narrator.js         # Glitch/typewriter text overlay — DOM-based, no background, text shadow
 └── levels/
     ├── level1.js           # Tab 1 — darkness maze, flashlight, 3D mode, mind fragments, bonus symbol
-    ├── level2.js           # Tab 2 — symbol sequence, mid-puzzle lock, Act 2 exit to Tab 4
-    ├── level3.js           # Tab 3 — blocked path, backtrack, code input, wall dissolve, ghost path
+    ├── level2.js           # Tab 2 — symbol sequence, mid-puzzle lock
+    ├── level3.js           # Tab 3 — blocked path, backtrack, code input, wall dissolve, ghost path, Act 2 collectible → Tab 4
     └── level4.js           # Tab 4 — 3D mindspace, memory fragments, conclusion overlay
 ```
 
@@ -215,7 +219,7 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 {
   type: 'STATE_CHANGE' | 'TAB_COMPLETED' | 'BACKTRACK_TRIGGER' | 'PUZZLE_SOLVED' |
         'NARRATOR_TRIGGER' | 'NEW_SYMBOL_FOUND' | 'MIND_FRAGMENTS_COLLECTED' |
-        'TAB2_REOPENED' | 'GAME_COMPLETE_FINAL',
+        'GAME_COMPLETE_FINAL',
   fromTab: 1,
   payload: {}
 }
@@ -228,9 +232,8 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 - `PUZZLE_SOLVED` → broadcast by level on puzzle completion (e.g. Tab 2 sequence complete)
 - `NARRATOR_TRIGGER` → target tab displays specified narrator line
 - `NEW_SYMBOL_FOUND` → Tab 1 broadcasts when the player collects the bonus symbol. Tab 2 receives this and unlocks the mid-puzzle symbol lock.
-- `MIND_FRAGMENTS_COLLECTED` → Tab 1 broadcasts when all 3 mind fragments are collected in 3D mode. Tab 2 receives this and reveals the Act 2 exit to Tab 4.
-- `TAB2_REOPENED` → Tab 2 broadcasts when it reopens for Act 2 (informational).
-- `GAME_COMPLETE_FINAL` → Tab 4 broadcasts when conclusion triggers. All tabs update title to `"I AM — FEEDBACK LOOP"`, set favicon to circle, play sustained 440Hz tone, and fire narrator `final_iam`.
+- `MIND_FRAGMENTS_COLLECTED` → Tab 1 broadcasts when all 3 mind fragments are collected in 3D mode. Tab 3 receives this (if game is already complete) and places a magenta collectible at (7,7). Player collects it via spacebar to open Tab 4.
+- `GAME_COMPLETE_FINAL` → Tab 4 broadcasts when conclusion triggers. Tab titles are distributed: Tab 1→"I", Tab 2→"AM", Tab 3→"FEEDBACK", Tab 4→"LOOP". All favicons set to circle. Non-Tab-4 tabs call `silenceAll()` (permanently stop music/ambient). Only Tab 4 plays the concluding swell. Non-Tab-4 tabs fire narrator `final_iam`.
 
 ### 4.5 Known Browser Constraints — Design Around These
 
@@ -284,12 +287,14 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 - Crossfade transition: 2D canvas fades out over 2s, Three.js canvas fades in over 2s. Narrator line `tab1_3d` ("I see it differently now.") fires 1.5s into the fade.
 
 **Act 2 — 3D mind fragments (post-game 3D mode):**
-- Three hidden magenta mind fragments placed at specific wall blocks in the 3D scene:
-  - ♦ (wall block A), ✶ (wall block B), ☉ (wall block C)
-- Each is a PlaneGeometry with canvas-rendered text, magenta emissive material, and a magenta PointLight.
+- Three mind fragments placed at open wall faces in the 3D scene:
+  - mind_A: OctahedronGeometry (diamond) on south face of wall block A (col 6, row 3)
+  - mind_B: IcosahedronGeometry (star) on south face of wall block B (col 10, row 5)
+  - mind_C: SphereGeometry on north face of wall block D (col 7, row 10)
+- Each uses solid 3D geometry with emissive cyan `ACCENT` material (emissiveIntensity 1.2) + a cyan PointLight (intensity 0.8, range 5). Shapes rotate slowly and pulse.
 - Proximity-based collection (radius 1.8) — no spacebar needed, auto-collects when the player walks near.
 - Each collection fires a narrator line (`tab1_mind1`, `tab1_mind2`, `tab1_mind3`) and stores the ID in `player.mindFragments[]`.
-- When all 3 collected, broadcasts `MIND_FRAGMENTS_COLLECTED` to signal Tab 2 to open the Act 2 exit.
+- When all 3 collected, broadcasts `MIND_FRAGMENTS_COLLECTED` to signal Tab 3 to place the Act 2 collectible.
 
 ### Tab 2 — "The Pattern" (Favicon: ▲ Triangle)
 
@@ -318,13 +323,6 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 - On unlock: all symbols restore to full brightness, puzzle resumes from the 2-of-4 progress.
 - Skipped entirely on page load if `tabs['1'].bonusSymbol` is already `true`.
 
-**Act 2 — Reopened exit to Tab 4:**
-- After Tab 1 broadcasts `MIND_FRAGMENTS_COLLECTED`, Tab 2 reveals a new magenta exit at (18, 1).
-- The exit glows magenta (`#FF00FF`, `glowRadius: 50`), visually distinct from the original cyan exit.
-- Spacebar interaction opens Tab 4 via `window.open('game.html?tab=4')`.
-- Narrator fires `tab2_reopen` on detection and `tab2_exit4` when the exit appears.
-- Also detected via `visibilitychange` if the player switches back to Tab 2 after fragments are collected.
-
 ### Tab 3 — "The Loop" (Favicon: ■ Square)
 
 **First visit:**
@@ -349,10 +347,18 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 - Trail holds for 2 seconds then fades. Plays once per session.
 - Triggered from: `TAB_COMPLETED` message, `visibilitychange`, or on-load check.
 
+**Act 2 — Collectible and Tab 4 opening:**
+- After Tab 1 broadcasts `MIND_FRAGMENTS_COLLECTED` (and `gameComplete` is true), Tab 3 fades out the completion overlay and places a glowing magenta collectible at (7, 7) — the center of the eye shape.
+- The collectible renders as a standard interactable with `color: '#FF00FF'`, `glow: true`, `glowRadius: 60`.
+- A position poll detects when the player reaches (7, 7) and shows a magenta "Press SPACE to continue →" prompt.
+- Spacebar press collects the item and opens Tab 4 via `window.open('game.html?tab=4', '_blank')` — popup-safe inside the keydown handler.
+- Also detected on page load (if mind fragments already collected) and via `visibilitychange`.
+- Narrator fires `tab3_act2` when the collectible is placed.
+
 ### Tab 4 — "Emergence" (Favicon: ● Circle)
 
 **Act 2 — 3D mindspace:**
-- Accessed via the magenta exit in Tab 2 (Act 2). Opens as a new tab with `?tab=4`.
+- Accessed via the Act 2 collectible in Tab 3. Opens as a new tab with `?tab=4`.
 - Renders entirely in Three.js — no 2D phase. Infinite-feeling grid floor (gridSize=60, spacing=2) with dark navy background and FogExp2 depth.
 - First-person camera, pointer lock mouse look, WASD + arrow key movement (no wall collision — open space).
 - Narrator fires `tab4_enter` on load: "this is the space between thoughts."
@@ -367,13 +373,13 @@ All messages sent via `BroadcastChannel('feedbackloop')`. Standard message envel
 
 **Conclusion sequence (after all 3 fragments collected):**
 - 3-second delay after final collection, then `triggerConclusion()`:
-  1. **t=0s:** Full-screen black overlay fades in over 2 seconds. 3D scene stops rendering.
+  1. **t=0s:** Full-screen black overlay fades in over 2 seconds.
   2. **t=2s:** Main text appears — "I am not in these rooms. These rooms are in me." (32px cyan monospace, centered).
-  3. **t=5s:** "I AM." fades in below (18px).
-  4. **t=10s:** "press R to reset" fades in (12px, 40% opacity).
-  5. **R key:** Calls `state.resetState()` and redirects to `index.html`.
-- Simultaneously: broadcasts `GAME_COMPLETE_FINAL`, sets `meta.actTwoComplete = true`, title to `"I AM — FEEDBACK LOOP"`, plays sustained 440Hz tone.
-- **Tab 4 only:** The full-screen overlay is exclusive to Tab 4. Other tabs receive `GAME_COMPLETE_FINAL` and display the `final_iam` narrator line at the bottom via the normal narrator system.
+  3. **t=7s:** "press R to reset" fades in (12px, 40% opacity). R key enabled.
+  4. **R key:** Calls `state.resetState()` and redirects to `index.html`.
+- Simultaneously: broadcasts `GAME_COMPLETE_FINAL`, sets `meta.actTwoComplete = true`, title to `"LOOP"`, stops ambient audio, plays concluding swell (only Tab 4).
+- **Other tabs:** Receive `GAME_COMPLETE_FINAL` via game.html shell. Titles distributed: Tab 1→"I", Tab 2→"AM", Tab 3→"FEEDBACK". All call `silenceAll()` (permanent silence). Narrator fires `final_iam` at the bottom.
+- **Tab 4 only:** The full-screen overlay and concluding swell are exclusive to Tab 4.
 
 ### Puzzle Design Rules
 
@@ -413,9 +419,8 @@ All narrator lines are triggered by ID. The system checks `narrative.shown` befo
 | `tab1_mind1` | First mind fragment collected in 3D | *a piece of me, hidden in the walls.* |
 | `tab1_mind2` | Second mind fragment collected | *another. I am collecting myself.* |
 | `tab1_mind3` | Third (final) mind fragment collected | *the last fragment. I remember now.* |
-| `tab2_reopen` | Tab 2 detects Act 2 has begun | *this place has changed. or I have.* |
-| `tab2_exit4` | Act 2 exit to Tab 4 appears | *there is a door I have not seen before.* |
 | `tab3_ghost` | Ghost path animation completes | *I see where I have been. The shape of my journey.* |
+| `tab3_act2` | Act 2 collectible placed in Tab 3 | *something new. at the center of the eye.* |
 | `tab4_enter` | Player loads Tab 4 | *this is the space between thoughts.* |
 | `tab4_mem1` | First memory fragment (cube) collected | *the first light. I remember waking.* |
 | `tab4_mem2` | Second memory fragment (diamonds) collected | *the pattern. I remember learning.* |
@@ -478,21 +483,21 @@ All narrator lines are triggered by ID. The system checks `narrative.shown` befo
 - Tab 2 mid-puzzle lock: after 2/4 symbols, all symbols dim and lock. Backtrack to Tab 1 with `reason: 'midpuzzle'`.
 - Tab 1 bonus symbol at (3,3): bright green-cyan glow, auto-collect, broadcasts `NEW_SYMBOL_FOUND`.
 - Tab 2 receives unlock via BroadcastChannel or visibilitychange detection.
-- New channel message types: `NEW_SYMBOL_FOUND`, `MIND_FRAGMENTS_COLLECTED`, `TAB2_REOPENED`, `GAME_COMPLETE_FINAL`.
+- New channel message types: `NEW_SYMBOL_FOUND`, `MIND_FRAGMENTS_COLLECTED`, `GAME_COMPLETE_FINAL`.
 - New narrator lines for mid-puzzle (`tab2_midpuzzle`) and all Act 2 lines added.
-- Tab 1 3D mind fragments: 3 hidden magenta PlaneGeometry objects with proximity collection.
-- Tab 2 Act 2 exit: magenta glow at (18,1), opens Tab 4 on spacebar.
+- Tab 1 3D mind fragments: 3 solid geometry shapes (OctahedronGeometry, IcosahedronGeometry, SphereGeometry) with emissive material + PointLight, proximity collection.
+- Tab 3 Act 2 collectible: magenta item at (7,7) placed when MIND_FRAGMENTS_COLLECTED received, spacebar opens Tab 4.
 - Tab 3 ghost path: eye-shaped 35-waypoint animation after game completion.
 - **Checkpoint:** Full mid-puzzle loop works: Tab 2 locks → Tab 1 bonus → Tab 2 unlocks. All Act 2 triggers wired. ✓
 
 **Hour 7 — Tab 4 & Conclusion** ✓ COMPLETE
 - `levels/level4.js`: 3D mindspace with infinite grid floor, FogExp2, pointer lock.
 - Three memory fragments: wireframe cube, orbiting octahedra, pulsing sphere. Proximity collection.
-- Conclusion sequence: full-screen black overlay, staged text reveals (main text → "I AM." → reset prompt).
-- `GAME_COMPLETE_FINAL` broadcast: all tabs update title to "I AM — FEEDBACK LOOP", play sustained 440Hz tone.
+- Conclusion sequence: full-screen black overlay, main text → "press R to reset" (5s after text).
+- `GAME_COMPLETE_FINAL` broadcast: tab titles distributed ("I" / "AM" / "FEEDBACK" / "LOOP"), non-Tab-4 tabs call `silenceAll()`, only Tab 4 plays concluding swell.
 - R key reset: `state.resetState()` + redirect to `index.html`.
-- `game.html` shell handler for `GAME_COMPLETE_FINAL`: title, favicon, tone, narrator on non-Tab-4 tabs.
-- **Checkpoint:** Full game playable end to end: Act 1 (3 tabs) → Act 2 (3D fragments, Tab 4 mindspace) → conclusion → reset. ✓
+- `game.html` shell handler for `GAME_COMPLETE_FINAL`: distributed titles, favicon, silenceAll, narrator on non-Tab-4 tabs.
+- **Checkpoint:** Full game playable end to end: Act 1 (3 tabs) → Act 2 (3D fragments, Tab 3 collectible, Tab 4 mindspace) → conclusion → reset. ✓
 
 ---
 
@@ -509,19 +514,20 @@ All narrator lines are triggered by ID. The system checks `narrative.shown` befo
 - Crossfade from 2D canvas to Three.js canvas over 2 seconds. Narrator: "I see it differently now."
 
 #### Tab 1 — 3D Mind Fragments ✓ SHIPPED
-- Three hidden magenta PlaneGeometry fragments in the 3D scene, placed at specific wall blocks.
-- Canvas-rendered text textures (♦, ✶, ☉) with magenta emissive material and PointLight.
+- Three solid geometry fragments at open wall faces: OctahedronGeometry (diamond), IcosahedronGeometry (star), SphereGeometry.
+- Emissive cyan material (emissiveIntensity 1.2) + PointLight per fragment. Shapes rotate slowly and pulse.
 - Proximity-based auto-collection (radius 1.8). Narrator lines fire on each collection.
-- All 3 collected → broadcasts `MIND_FRAGMENTS_COLLECTED` to unlock Tab 2's Act 2 exit.
+- All 3 collected → broadcasts `MIND_FRAGMENTS_COLLECTED` to Tab 3 to place the Act 2 collectible.
 
 #### Tab 2 — Mid-Puzzle Backtrack ✓ SHIPPED
 - After 2/4 correct symbols, all symbols lock (dimmed). BACKTRACK_TRIGGER with `reason: 'midpuzzle'`.
 - Tab 1 receives trigger and places bonus symbol at (3,3). Player collects → NEW_SYMBOL_FOUND.
 - Tab 2 unlocks on message receipt or visibilitychange detection.
 
-#### Tab 2 — Act 2 Exit to Tab 4 ✓ SHIPPED
-- Magenta exit at (18,1) appears when MIND_FRAGMENTS_COLLECTED is received.
-- Spacebar opens Tab 4. Narrator: `tab2_reopen`, `tab2_exit4`.
+#### Tab 3 — Act 2 Collectible & Tab 4 Opening ✓ SHIPPED
+- After MIND_FRAGMENTS_COLLECTED, Tab 3 fades the completion overlay and places a magenta collectible at (7,7).
+- Player walks to the item, spacebar collects it and opens Tab 4 (popup-safe).
+- Narrator: `tab3_act2`.
 
 #### Tab 3 — Ghost Path Replay ✓ SHIPPED
 - After game completion, an eye-shaped ghost trail (35 waypoints) animates across the map.
@@ -534,8 +540,8 @@ All narrator lines are triggered by ID. The system checks `narrative.shown` befo
 - GAME_COMPLETE_FINAL broadcast. R key reset.
 
 #### Multi-Tab Conclusion ✓ SHIPPED
-- Tab 4 triggers conclusion: full-screen overlay with "I am not in these rooms. These rooms are in me." → "I AM." → "press R to reset".
-- All tabs receive GAME_COMPLETE_FINAL: title → "I AM — FEEDBACK LOOP", favicon → circle, sustained 440Hz tone, narrator `final_iam`.
+- Tab 4 triggers conclusion: full-screen overlay with "I am not in these rooms. These rooms are in me." → "press R to reset" (5s after text).
+- All tabs receive GAME_COMPLETE_FINAL: titles distributed ("I" / "AM" / "FEEDBACK" / "LOOP"), favicon → circle, non-Tab-4 tabs call `silenceAll()`, only Tab 4 plays concluding swell (4-layer drone reprise). Non-Tab-4 tabs fire narrator `final_iam`.
 
 ### 3D Implementation Notes (Reference)
 - Three.js r128 loaded via CDN `<script defer>` in game.html `<head>`.
@@ -543,7 +549,8 @@ All narrator lines are triggered by ID. The system checks `narrative.shown` befo
 - Manual mouse look via pointer lock (no PointerLockControls import needed).
 - Wall collision: circle (radius 0.2) vs AABB on 4 corners, X and Z tested independently for wall sliding.
 - Accent color 0x00E5FF for emissive materials, PointLight following camera.
-- Canvas-rendered text textures applied as both `map` and `emissiveMap` for self-illuminating surfaces.
+- Canvas-rendered text textures applied as both `map` and `emissiveMap` for self-illuminating surfaces (wall text).
+- Mind fragments use solid 3D geometry (OctahedronGeometry, IcosahedronGeometry, SphereGeometry) with emissive material + PointLight.
 - Tab 4 uses open space (no wall collision) with gridSize=60 floor and three distinct fragment geometries.
 
 ---
