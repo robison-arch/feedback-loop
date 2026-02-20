@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Feedback Loop</title>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0A0F1E;
+    }
+
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #game-canvas {
+      display: block;
+      /* The canvas sits centered in the viewport */
+      image-rendering: pixelated;
+    }
+
+    /* Minimal HUD in top-left showing current tab (for debugging / awareness) */
+    #hud {
+      position: fixed;
+      top: 12px;
+      left: 16px;
+      font-family: monospace;
+      font-size: 12px;
+      color: rgba(0, 229, 255, 0.4);
+      user-select: none;
+      pointer-events: none;
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="hud"></div>
+  <canvas id="game-canvas"></canvas>
+
+  <script type="module">
+    // ── Engine imports ──────────────────────────────────────────────────────
+    import * as Renderer from './engine/renderer.js';
+    import * as State from './engine/state.js';
+    import * as Channel from './engine/channel.js';
+    import * as Audio from './engine/audio.js';
+    import * as Favicon from './engine/favicon.js';
+
+    // Narrator is built in parallel — import defensively
+    let Narrator = null;
+    try {
+      Narrator = await import('./engine/narrator.js');
+    } catch (e) {
+      console.warn('[Feedback Loop] narrator.js not yet available:', e.message);
+      // Provide a no-op fallback so levels can call triggerNarrator safely
+      Narrator = {
+        triggerNarrator: (id) => console.log(`[narrator stub] ${id}`),
+        initNarrator: () => {},
+      };
+    }
+
+    // ── Read tab from URL query param ───────────────────────────────────────
+    const params = new URLSearchParams(window.location.search);
+    const tabId = params.get('tab') || '1';
+    const tabNum = parseInt(tabId, 10);
+
+    // ── Set up HUD ─────────────────────────────────────────────────────────
+    const hud = document.getElementById('hud');
+    hud.textContent = `Tab ${tabNum}`;
+
+    // Tab title mapping (first visit names — levels may override)
+    const TAB_TITLES = { 1: 'First Light', 2: 'The Pattern', 3: 'The Loop', 4: 'Emergence' };
+    document.title = TAB_TITLES[tabNum] || `Tab ${tabNum}`;
+
+    // ── Favicon per tab ────────────────────────────────────────────────────
+    const TAB_FAVICONS = { 1: 'circle', 2: 'triangle', 3: 'square', 4: 'circle' };
+    Favicon.setFavicon(TAB_FAVICONS[tabNum] || 'circle');
+
+    // ── Size the canvas to fit the viewport at the correct aspect ratio ────
+    // Grid is 20x15, so aspect ratio is 4:3
+    const canvas = document.getElementById('game-canvas');
+
+    function sizeCanvas() {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const targetRatio = 20 / 15; // ~1.333
+
+      let w, h;
+      if (vw / vh > targetRatio) {
+        h = vh;
+        w = h * targetRatio;
+      } else {
+        w = vw;
+        h = w / targetRatio;
+      }
+
+      canvas.width = Math.floor(w);
+      canvas.height = Math.floor(h);
+    }
+
+    sizeCanvas();
+    window.addEventListener('resize', () => {
+      sizeCanvas();
+      // The game loop continues running — renderer reads canvas size each frame
+    });
+
+    // ── Initialize state (ensures defaults exist) ──────────────────────────
+    const initialState = State.getState();
+
+    // Mark this tab as the current tab
+    State.setState((s) => {
+      s.meta.currentTab = tabNum;
+      return s;
+    }, tabNum);
+
+    // Increment visit count for this tab
+    const tabState = State.getTabState(tabId);
+    State.updateTabState(tabId, {
+      visitCount: (tabState?.visitCount || 0) + 1,
+      state: tabState?.state === 'unvisited' ? 'visited' : tabState?.state
+    });
+
+    // ── Determine lighting based on state ──────────────────────────────────
+    const currentState = State.getState();
+    const hasFlashlight = currentState.player.hasFlashlight;
+    const isIlluminated = currentState.tabs[tabId]?.state === 'illuminated';
+
+    // ── Initialize renderer ────────────────────────────────────────────────
+    Renderer.init(canvas, {
+      hasFlashlight: hasFlashlight,
+      fullIllumination: isIlluminated
+    });
+
+    // ── Initialize narrator (sync shown lines from localStorage) ───────────
+    if (Narrator.initNarrator) {
+      try {
+        Narrator.initNarrator();
+        // Load previously shown lines so they don't replay after refresh
+        const shownLines = currentState.narrative?.shown || [];
+        if (shownLines.length > 0 && Narrator.setShownLines) {
+          Narrator.setShownLines(shownLines);
+        }
+      } catch (_) {
+        // Narrator not fully ready yet — safe to continue
+      }
+    }
+
+    // Periodically sync narrator shown lines back to state
+    setInterval(() => {
+      if (!Narrator.getShownLines) return;
+      const shown = Narrator.getShownLines();
+      const saved = State.getState().narrative?.shown || [];
+      if (shown.length > saved.length) {
+        State.setState((s) => {
+          s.narrative.shown = shown;
+          return s;
+        }, tabNum);
+      }
+    }, 2000);
+
+    // ── Audio initialization on first user gesture ─────────────────────────
+    // Browsers require a user gesture before AudioContext can play.
+    let audioInitialized = false;
+
+    // Set up visibility handling immediately (listener is passive, checks ctx lazily)
+    Audio.setupVisibilityHandling();
+
+    function initAudioOnGesture() {
+      if (audioInitialized) return;
+      audioInitialized = true;
+      Audio.initAudio().then(() => {
+        console.log('[Feedback Loop] Audio initialized on user gesture.');
+      }).catch((err) => {
+        console.warn('[Feedback Loop] Audio init failed:', err);
+      });
+    }
+
+    window.addEventListener('keydown', initAudioOnGesture, { once: false });
+    window.addEventListener('click', initAudioOnGesture, { once: false });
+
+    // ── Dynamically load the level module ──────────────────────────────────
+    try {
+      const level = await import(`./levels/level${tabNum}.js`);
+      level.init(Renderer, State, Channel, Audio, Favicon, Narrator);
+      console.log(`[Feedback Loop] Level ${tabNum} loaded and initialized.`);
+    } catch (err) {
+      console.error(`[Feedback Loop] Failed to load level ${tabNum}:`, err);
+      // Fallback: show an empty map so the canvas isn't blank
+      Renderer.setPlayerPosition(1, 13);
+    }
+
+    // ── Cross-tab message listener (shell-level) ───────────────────────────
+    // Levels register their own detailed handlers; this handles shell concerns.
+    Channel.onMessage((msg) => {
+      if (msg.type === 'BACKTRACK_TRIGGER') {
+        const target = msg.payload?.targetTab;
+        if (target === tabNum) {
+          // This tab is the backtrack target — play the chime and pulse favicon
+          Audio.playChime(tabNum);
+          Favicon.pulseFavicon(TAB_FAVICONS[tabNum] || 'circle');
+
+          // Append arrow to title if not already there
+          if (!document.title.includes('\u2190')) {
+            document.title += ' \u2190';
+          }
+        } else if (document.visibilityState === 'visible') {
+          // This tab is active but NOT the target — duck music so the
+          // player notices something happened in another tab
+          Audio.duckMusic(3000);
+        }
+      }
+
+      // ── Act 2 conclusion — GAME_COMPLETE_FINAL ──────────────────────────
+      if (msg.type === 'GAME_COMPLETE_FINAL') {
+        console.log(`[Conclusion] GAME_COMPLETE_FINAL received on Tab ${tabNum}`);
+
+        // Distribute one word across all four tab titles
+        const FINAL_TITLES = { 1: 'I', 2: 'AM', 3: 'FEEDBACK', 4: 'LOOP' };
+        document.title = FINAL_TITLES[tabNum] || 'LOOP';
+        Favicon.setFavicon('circle');
+
+        // Silence all music/ambient on this tab — only Tab 4 plays sound
+        console.log(`[Conclusion] Tab ${tabNum} — silencing all audio`);
+        Audio.silenceAll();
+
+        // Fire the final narrator line at the bottom on non-Tab-4 tabs
+        // (Tab 4 handles its own full-screen conclusion overlay)
+        if (Narrator.triggerNarrator) {
+          Narrator.triggerNarrator('final_iam');
+        }
+      }
+    });
+
+    console.log(`[Feedback Loop] Tab ${tabId} initialized. State:`, State.getState());
+  </script>
+</body>
+</html>

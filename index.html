@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Feedback Loop</title>
+  <style>
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0A0F1E;
+      font-family: 'Courier New', Courier, monospace;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    /* Background grid */
+    .grid-bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        linear-gradient(to right, #1A2340 1px, transparent 1px),
+        linear-gradient(to bottom, #1A2340 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.3;
+    }
+
+    /* Subtle radial vignette to add depth */
+    .vignette {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+      background: radial-gradient(ellipse at center, transparent 40%, rgba(10, 15, 30, 0.6) 100%);
+    }
+
+    .content {
+      position: relative;
+      z-index: 2;
+      text-align: center;
+    }
+
+    #title {
+      font-size: 56px;
+      font-weight: bold;
+      letter-spacing: 0.15em;
+      color: #00E5FF;
+      white-space: pre;
+      min-height: 1.2em;
+      line-height: 1.2;
+      text-shadow: 0 0 20px rgba(0, 229, 255, 0.15);
+      /* Reserve space so layout doesn't shift */
+      display: inline-block;
+    }
+
+    #title .char {
+      display: inline-block;
+      position: relative;
+      min-width: 0.65em;
+      transition: none;
+    }
+
+    #title .char.space {
+      min-width: 0.4em;
+    }
+
+    /* Subtle glow pulse on resolved title */
+    @keyframes titleGlow {
+      0%, 100% { text-shadow: 0 0 20px rgba(0, 229, 255, 0.15); }
+      50% { text-shadow: 0 0 30px rgba(0, 229, 255, 0.25), 0 0 60px rgba(0, 229, 255, 0.08); }
+    }
+
+    #title.resolved {
+      animation: titleGlow 4s ease-in-out infinite;
+    }
+
+    #subtitle {
+      margin-top: 48px;
+      font-size: 16px;
+      color: rgba(0, 229, 255, 0.5);
+      letter-spacing: 0.12em;
+      opacity: 0;
+      transition: opacity 1.5s ease-in;
+    }
+
+    #subtitle.visible {
+      opacity: 1;
+    }
+
+    /* Blinking cursor on subtitle */
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    #subtitle .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: rgba(0, 229, 255, 0.5);
+      margin-left: 4px;
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+
+    /* Scanline overlay - very subtle */
+    .scanlines {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 3;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+      );
+    }
+  </style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <div class="vignette"></div>
+  <div class="scanlines"></div>
+
+  <div class="content">
+    <div id="title" aria-label="FEEDBACK LOOP"></div>
+    <div id="subtitle">
+      <span id="subtitle-text"></span><span class="cursor"></span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // ── Configuration ──────────────────────────────────────────────
+      const TITLE_TEXT = 'FEEDBACK LOOP';
+      const SUBTITLE_TEXT = 'Press Enter to begin';
+      const GLITCH_CHARS = '█▓░▒╔╗╚╝╠╣╦╩╬│─┌┐└┘├┤┬┴┼ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%&*!?<>{}[]|/\\^~';
+      const RESOLVE_DURATION = 2500;   // total window for characters to resolve (ms)
+      const RECORRUPT_CHANCE = 0.35;   // chance a resolved char will briefly re-glitch
+      const RECORRUPT_DURATION = 100;  // how long a re-corruption lasts (ms)
+      const SCRAMBLE_INTERVAL = 60;    // how fast unresolved chars cycle (ms)
+      const SUBTITLE_DELAY = 600;      // delay after title resolves before subtitle fades in (ms)
+
+      // ── State ──────────────────────────────────────────────────────
+      let titleResolved = false;
+      let started = false;
+
+      // ── Helpers ────────────────────────────────────────────────────
+      function randomGlitchChar() {
+        return GLITCH_CHARS[Math.floor(Math.random() * GLITCH_CHARS.length)];
+      }
+
+      function randomBetween(min, max) {
+        return min + Math.random() * (max - min);
+      }
+
+      // ── Build title characters ─────────────────────────────────────
+      const titleEl = document.getElementById('title');
+      const subtitleEl = document.getElementById('subtitle');
+      const subtitleTextEl = document.getElementById('subtitle-text');
+
+      const charEls = [];
+      const charStates = []; // { resolved, resolveTime, recorruptedUntil, isSpace }
+
+      let nonSpaceIdx = 0;
+      for (let i = 0; i < TITLE_TEXT.length; i++) {
+        const span = document.createElement('span');
+        span.className = 'char' + (TITLE_TEXT[i] === ' ' ? ' space' : '');
+        span.textContent = TITLE_TEXT[i] === ' ' ? ' ' : randomGlitchChar();
+        titleEl.appendChild(span);
+        charEls.push(span);
+
+        // ~120ms per character, deliberate left-to-right reveal
+        const resolveTime = TITLE_TEXT[i] === ' '
+          ? 0
+          : 600 + nonSpaceIdx * 120 + randomBetween(-30, 30);
+        if (TITLE_TEXT[i] !== ' ') nonSpaceIdx++;
+
+        charStates.push({
+          resolved: TITLE_TEXT[i] === ' ',
+          resolveTime: resolveTime,
+          recorruptedUntil: 0,
+          isSpace: TITLE_TEXT[i] === ' '
+        });
+      }
+
+      // ── Animation loop ─────────────────────────────────────────────
+      const startTime = performance.now();
+      let allResolved = false;
+
+      function animate(now) {
+        const elapsed = now - startTime;
+        let resolvedCount = 0;
+
+        for (let i = 0; i < charEls.length; i++) {
+          const state = charStates[i];
+          if (state.isSpace) {
+            resolvedCount++;
+            continue;
+          }
+
+          // Check if it's time to resolve this character
+          if (!state.resolved && elapsed >= state.resolveTime) {
+            state.resolved = true;
+          }
+
+          if (state.resolved) {
+            resolvedCount++;
+
+            // Handle re-corruption: occasionally glitch a resolved char back
+            if (state.recorruptedUntil > 0) {
+              if (now < state.recorruptedUntil) {
+                // Still in re-corruption window — show glitch
+                charEls[i].textContent = randomGlitchChar();
+              } else {
+                // Re-corruption ended — restore correct char
+                charEls[i].textContent = TITLE_TEXT[i];
+                state.recorruptedUntil = 0;
+              }
+            } else {
+              charEls[i].textContent = TITLE_TEXT[i];
+
+              // Maybe trigger a new re-corruption (only during the resolve window + a brief aftermath)
+              if (elapsed < RESOLVE_DURATION + 1500 && Math.random() < RECORRUPT_CHANCE * 0.02) {
+                state.recorruptedUntil = now + RECORRUPT_DURATION;
+              }
+            }
+          } else {
+            // Unresolved — keep scrambling (low probability per frame for slower flicker)
+            if (Math.random() < 0.08) {
+              charEls[i].textContent = randomGlitchChar();
+            }
+          }
+        }
+
+        // Check if all characters are resolved (and no re-corruptions active)
+        const allClean = charStates.every(s => s.resolved && s.recorruptedUntil === 0);
+
+        if (allClean && !allResolved) {
+          allResolved = true;
+          titleEl.classList.add('resolved');
+
+          // Show subtitle after a short pause
+          setTimeout(function () {
+            subtitleTextEl.textContent = SUBTITLE_TEXT;
+            subtitleEl.classList.add('visible');
+            titleResolved = true;
+          }, SUBTITLE_DELAY);
+        }
+
+        // Keep animating if we're still in the resolve/re-corrupt window
+        if (!allResolved || elapsed < RESOLVE_DURATION + 2000) {
+          requestAnimationFrame(animate);
+        } else {
+          // One final pass to ensure all chars are correct
+          for (let i = 0; i < charEls.length; i++) {
+            if (!charStates[i].isSpace) {
+              charEls[i].textContent = TITLE_TEXT[i];
+            }
+          }
+          // Start idle glitch loop
+          scheduleIdleGlitch();
+        }
+      }
+
+      // ── Idle glitch: periodic random corruption after title resolves ──
+      function scheduleIdleGlitch() {
+        const delay = randomBetween(2000, 5000);
+        setTimeout(function () {
+          if (started) return;
+
+          // Pick 1-2 random non-space characters to corrupt
+          const count = Math.random() < 0.5 ? 1 : 2;
+          const nonSpaceIndices = [];
+          for (let i = 0; i < TITLE_TEXT.length; i++) {
+            if (TITLE_TEXT[i] !== ' ') nonSpaceIndices.push(i);
+          }
+
+          const targets = [];
+          for (let c = 0; c < count; c++) {
+            const pick = nonSpaceIndices[Math.floor(Math.random() * nonSpaceIndices.length)];
+            if (!targets.includes(pick)) targets.push(pick);
+          }
+
+          // Corrupt
+          for (const idx of targets) {
+            charEls[idx].textContent = randomGlitchChar();
+          }
+
+          // Restore after 150ms, then schedule next
+          setTimeout(function () {
+            for (const idx of targets) {
+              charEls[idx].textContent = TITLE_TEXT[idx];
+            }
+            scheduleIdleGlitch();
+          }, 150);
+        }, delay);
+      }
+
+      // ── Audio — "Machine Awakening" ────────────────────────────────
+      // Strategy: create AudioContext and schedule ALL audio immediately.
+      // If the browser blocks autoplay (context suspended), the nodes sit
+      // ready. On first user gesture we just resume() — everything plays
+      // from the beginning with correct timing. No re-scheduling needed.
+      var audioCtx = null;
+      var audioMaster = null;
+      var musicRunning = false;
+      var musicTimerId = null;
+      var droneNodes = [];
+
+      // Frequencies — tritone / minor intervals for unease
+      var C1 = 32.70;
+      var C2 = 65.41, B2 = 123.47;
+      var C3 = 130.81, Eb3 = 155.56, Gb3 = 185.00;
+      var Gb4 = 369.99;
+
+      var BPM = 66;
+      var STEP = 60 / BPM / 4;
+      var PAT_DUR = STEP * 16;
+
+      function initAudio() {
+        try {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) { return; }
+
+        // Master gain
+        audioMaster = audioCtx.createGain();
+        audioMaster.gain.setValueAtTime(0.07, 0);
+        audioMaster.connect(audioCtx.destination);
+
+        // Schedule swell + music immediately (plays from t=0)
+        scheduleSwell();
+        scheduleLoopStart();
+
+        // If context is suspended, resume on first real user gesture
+        if (audioCtx.state === 'suspended') {
+          var hint = document.createElement('div');
+          hint.textContent = 'click anywhere for audio';
+          hint.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:11px;color:rgba(0,229,255,0.25);letter-spacing:0.1em;z-index:10;opacity:0;transition:opacity 1s;pointer-events:none;';
+          document.body.appendChild(hint);
+          setTimeout(function () { hint.style.opacity = '1'; }, 1500);
+
+          function onGesture() {
+            audioCtx.resume();
+            document.removeEventListener('click', onGesture);
+            document.removeEventListener('keydown', onGesture);
+            document.removeEventListener('touchstart', onGesture);
+            hint.style.opacity = '0';
+            setTimeout(function () { hint.remove(); }, 1000);
+          }
+          document.addEventListener('click', onGesture);
+          document.addEventListener('keydown', onGesture);
+          document.addEventListener('touchstart', onGesture);
+        }
+      }
+
+      // ── Swell: 2.5s power-up sound ──────────────────────────────
+      function scheduleSwell() {
+        var dur = 2.5;
+
+        // Low drone: 35→65Hz
+        var drone = audioCtx.createOscillator();
+        var droneG = audioCtx.createGain();
+        drone.type = 'sine';
+        drone.frequency.setValueAtTime(35, 0);
+        drone.frequency.exponentialRampToValueAtTime(65, dur);
+        droneG.gain.setValueAtTime(0.001, 0);
+        droneG.gain.exponentialRampToValueAtTime(0.7, dur);
+        droneG.gain.linearRampToValueAtTime(0.3, dur + 1.0);
+        droneG.gain.linearRampToValueAtTime(0.001, dur + 2.0);
+        drone.connect(droneG); droneG.connect(audioMaster);
+        drone.start(0); drone.stop(dur + 2.5);
+        drone.onended = function () { drone.disconnect(); droneG.disconnect(); };
+
+        // Tritone drone: ~tritone above, deeply unsettling
+        var tri = audioCtx.createOscillator();
+        var triG = audioCtx.createGain();
+        tri.type = 'sine';
+        tri.frequency.setValueAtTime(49.5, 0);
+        tri.frequency.exponentialRampToValueAtTime(92, dur);
+        triG.gain.setValueAtTime(0.001, 0);
+        triG.gain.exponentialRampToValueAtTime(0.35, dur * 0.8);
+        triG.gain.linearRampToValueAtTime(0.1, dur + 1.5);
+        triG.gain.linearRampToValueAtTime(0.001, dur + 2.0);
+        tri.connect(triG); triG.connect(audioMaster);
+        tri.start(0); tri.stop(dur + 2.5);
+        tri.onended = function () { tri.disconnect(); triG.disconnect(); };
+
+        // Detuned shimmer pair: 3Hz beating
+        var shimA = audioCtx.createOscillator();
+        var shimB = audioCtx.createOscillator();
+        var shimG = audioCtx.createGain();
+        shimA.type = 'triangle'; shimB.type = 'triangle';
+        shimA.frequency.setValueAtTime(2400, 0);
+        shimB.frequency.setValueAtTime(2403, 0);
+        shimG.gain.setValueAtTime(0.001, 0);
+        shimG.gain.setValueAtTime(0.001, 0.8);
+        shimG.gain.exponentialRampToValueAtTime(0.08, dur);
+        shimG.gain.linearRampToValueAtTime(0.015, dur + 2.0);
+        shimA.connect(shimG); shimB.connect(shimG); shimG.connect(audioMaster);
+        shimA.start(0); shimB.start(0);
+        shimA.stop(dur + 2.5); shimB.stop(dur + 2.5);
+        shimA.onended = function () { shimA.disconnect(); shimB.disconnect(); shimG.disconnect(); };
+
+        // Sub-bass with LFO
+        var sub = audioCtx.createOscillator();
+        var subG = audioCtx.createGain();
+        var subLfo = audioCtx.createOscillator();
+        var subLfoG = audioCtx.createGain();
+        sub.type = 'sine'; sub.frequency.setValueAtTime(C1, 0);
+        subLfo.type = 'sine'; subLfo.frequency.setValueAtTime(0.5, 0);
+        subLfoG.gain.setValueAtTime(8, 0);
+        subLfo.connect(subLfoG); subLfoG.connect(sub.frequency);
+        subG.gain.setValueAtTime(0.001, 0);
+        subG.gain.exponentialRampToValueAtTime(0.4, dur);
+        subG.gain.linearRampToValueAtTime(0.1, dur + 1.5);
+        subG.gain.linearRampToValueAtTime(0.001, dur + 2.0);
+        sub.connect(subG); subG.connect(audioMaster);
+        sub.start(0); subLfo.start(0);
+        sub.stop(dur + 2.5); subLfo.stop(dur + 2.5);
+        sub.onended = function () { sub.disconnect(); subG.disconnect(); subLfo.disconnect(); subLfoG.disconnect(); };
+      }
+
+      // ── Music loop starts at t=2.5s (AudioContext time) ─────────
+      function scheduleLoopStart() {
+        var swellEnd = 2.5;
+        // We can't pre-schedule the infinite loop, so use a polling
+        // approach that starts once AudioContext time passes the swell
+        musicRunning = true;
+
+        var mGain = audioCtx.createGain();
+        mGain.gain.setValueAtTime(0.001, swellEnd);
+        mGain.gain.linearRampToValueAtTime(1.0, swellEnd + 1.5);
+        mGain.connect(audioMaster);
+
+        // Continuous detuned drone bed
+        var dA = audioCtx.createOscillator();
+        var dB = audioCtx.createOscillator();
+        var dG = audioCtx.createGain();
+        dA.type = 'sine'; dB.type = 'sine';
+        dA.frequency.setValueAtTime(C2, 0);
+        dB.frequency.setValueAtTime(C2 + 1.5, 0);
+        dG.gain.setValueAtTime(0.001, 0);
+        dG.gain.setValueAtTime(0.001, swellEnd);
+        dG.gain.linearRampToValueAtTime(0.18, swellEnd + 1.5);
+        dA.connect(dG); dB.connect(dG); dG.connect(mGain);
+        dA.start(swellEnd); dB.start(swellEnd);
+        droneNodes = [dA, dB, dG];
+
+        var nextTime = swellEnd + 0.1;
+
+        function loop() {
+          if (!musicRunning || started) return;
+          // Only schedule when context time is close
+          if (audioCtx.currentTime < nextTime - PAT_DUR * 2) {
+            musicTimerId = setTimeout(loop, 500);
+            return;
+          }
+          while (nextTime < audioCtx.currentTime + PAT_DUR) {
+            mkSubPulse(nextTime, mGain);
+            mkPing(nextTime, mGain);
+            mkMelody(nextTime, mGain);
+            mkGhost(nextTime, mGain);
+            nextTime += PAT_DUR;
+          }
+          musicTimerId = setTimeout(loop, STEP * 4 * 1000);
+        }
+        loop();
+      }
+
+      // Sub-bass breathing
+      function mkSubPulse(t, dest) {
+        [0, 8].forEach(function (s) {
+          var tm = t + s * STEP;
+          var d = 8 * STEP;
+          var o = audioCtx.createOscillator();
+          var g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(C1, tm);
+          g.gain.setValueAtTime(0.001, tm);
+          g.gain.linearRampToValueAtTime(0.5, tm + d * 0.4);
+          g.gain.linearRampToValueAtTime(0.001, tm + d * 0.9);
+          o.connect(g); g.connect(dest);
+          o.start(tm); o.stop(tm + d);
+          o.onended = function () { o.disconnect(); g.disconnect(); };
+        });
+      }
+
+      // High metallic pings — sonar-like
+      function mkPing(t, dest) {
+        [3, 11].forEach(function (s) {
+          var tm = t + s * STEP;
+          var freq = 3200 + (s === 3 ? 0 : 400);
+          var o = audioCtx.createOscillator();
+          var g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(freq, tm);
+          o.frequency.exponentialRampToValueAtTime(freq * 0.85, tm + 0.3);
+          g.gain.setValueAtTime(0.06, tm);
+          g.gain.exponentialRampToValueAtTime(0.001, tm + 0.4);
+          o.connect(g); g.connect(dest);
+          o.start(tm); o.stop(tm + 0.45);
+          o.onended = function () { o.disconnect(); g.disconnect(); };
+        });
+      }
+
+      // Melody: tritone intervals, triangle wave, echo tails
+      function mkMelody(t, dest) {
+        var notes = [
+          { s: 0,  f: C3,   d: 1.2 },
+          { s: 5,  f: Gb3,  d: 0.9 },
+          { s: 9,  f: Eb3,  d: 1.0 },
+          { s: 13, f: B2,   d: 1.1 },
+        ];
+        for (var i = 0; i < notes.length; i++) {
+          var n = notes[i];
+          var tm = t + n.s * STEP;
+          // Main note — slow attack
+          var o = audioCtx.createOscillator();
+          var g = audioCtx.createGain();
+          o.type = 'triangle';
+          o.frequency.setValueAtTime(n.f, tm);
+          g.gain.setValueAtTime(0.001, tm);
+          g.gain.linearRampToValueAtTime(0.14, tm + 0.08);
+          g.gain.exponentialRampToValueAtTime(0.001, tm + n.d);
+          o.connect(g); g.connect(dest);
+          o.start(tm); o.stop(tm + n.d + 0.01);
+          o.onended = function () { o.disconnect(); g.disconnect(); };
+          // Echo
+          var o2 = audioCtx.createOscillator();
+          var g2 = audioCtx.createGain();
+          o2.type = 'triangle';
+          o2.frequency.setValueAtTime(n.f, tm + 0.2);
+          g2.gain.setValueAtTime(0.001, tm + 0.2);
+          g2.gain.linearRampToValueAtTime(0.04, tm + 0.28);
+          g2.gain.exponentialRampToValueAtTime(0.001, tm + 0.2 + n.d * 0.7);
+          o2.connect(g2); g2.connect(dest);
+          o2.start(tm + 0.2); o2.stop(tm + 0.2 + n.d * 0.7 + 0.01);
+          o2.onended = function () { o2.disconnect(); g2.disconnect(); };
+        }
+      }
+
+      // Ghost tones: reverse-swell from silence
+      function mkGhost(t, dest) {
+        var tm = t + 7 * STEP;
+        var d = 6 * STEP;
+        var o = audioCtx.createOscillator();
+        var g = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(Gb4, tm);
+        o.frequency.linearRampToValueAtTime(Gb4 * 0.98, tm + d);
+        g.gain.setValueAtTime(0.001, tm);
+        g.gain.linearRampToValueAtTime(0.06, tm + d * 0.7);
+        g.gain.exponentialRampToValueAtTime(0.001, tm + d);
+        o.connect(g); g.connect(dest);
+        o.start(tm); o.stop(tm + d + 0.01);
+        o.onended = function () { o.disconnect(); g.disconnect(); };
+      }
+
+      function stopMusic() {
+        musicRunning = false;
+        if (musicTimerId) { clearTimeout(musicTimerId); musicTimerId = null; }
+        droneNodes.forEach(function (n) {
+          try { if (n.stop) n.stop(); } catch (e) {}
+          try { n.disconnect(); } catch (e) {}
+        });
+        droneNodes = [];
+        if (audioMaster) {
+          try {
+            audioMaster.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.3);
+          } catch (e) {}
+          setTimeout(function () {
+            try { audioMaster.disconnect(); } catch (e) {}
+            audioMaster = null;
+          }, 500);
+        }
+      }
+
+      // Kick off animation and audio simultaneously
+      requestAnimationFrame(animate);
+      initAudio();
+
+      // ── Keyboard handler ───────────────────────────────────────────
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !started) {
+          started = true;
+          stopMusic();
+
+          // Clear game state for a fresh start
+          localStorage.removeItem('feedbackloop_state');
+
+          // Navigate to game in the same window
+          window.location.href = 'game.html?tab=1';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
